@@ -11,6 +11,7 @@ import * as BaseBridgeAdapter from '../generated-artifacts/BaseBridgeAdapter.jso
 import * as BaseGoerliBridgeAdapter from '../generated-artifacts/BaseGoerliBridgeAdapter.json';
 import * as BatchFillNativeOrdersFeature from '../generated-artifacts/BatchFillNativeOrdersFeature.json';
 import * as BSCBridgeAdapter from '../generated-artifacts/BSCBridgeAdapter.json';
+import * as BundleSwapFeature from '../generated-artifacts/BundleSwapFeature.json';
 import * as CeloBridgeAdapter from '../generated-artifacts/CeloBridgeAdapter.json';
 import * as CurveLiquidityProvider from '../generated-artifacts/CurveLiquidityProvider.json';
 import * as EthereumBridgeAdapter from '../generated-artifacts/EthereumBridgeAdapter.json';
@@ -90,4 +91,5 @@ export const artifacts = {
     OptimismBridgeAdapter: OptimismBridgeAdapter as ContractArtifact,
     PolygonBridgeAdapter: PolygonBridgeAdapter as ContractArtifact,
     MetaTransactionsFeatureV2: MetaTransactionsFeatureV2 as ContractArtifact,
+    BundleSwapFeature: BundleSwapFeature as ContractArtifact,
 };

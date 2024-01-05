@@ -9,6 +9,7 @@ export * from '../generated-wrappers/b_s_c_bridge_adapter';
 export * from '../generated-wrappers/base_bridge_adapter';
 export * from '../generated-wrappers/base_goerli_bridge_adapter';
 export * from '../generated-wrappers/batch_fill_native_orders_feature';
+export * from '../generated-wrappers/bundle_swap_feature';
 export * from '../generated-wrappers/celo_bridge_adapter';
 export * from '../generated-wrappers/curve_liquidity_provider';
 export * from '../generated-wrappers/ethereum_bridge_adapter';

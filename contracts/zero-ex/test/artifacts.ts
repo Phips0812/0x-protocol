@@ -15,6 +15,7 @@ import * as BatchFillNativeOrdersFeature from '../test/generated-artifacts/Batch
 import * as BootstrapFeature from '../test/generated-artifacts/BootstrapFeature.json';
 import * as BridgeProtocols from '../test/generated-artifacts/BridgeProtocols.json';
 import * as BSCBridgeAdapter from '../test/generated-artifacts/BSCBridgeAdapter.json';
+import * as BundleSwapFeature from '../test/generated-artifacts/BundleSwapFeature.json';
 import * as CeloBridgeAdapter from '../test/generated-artifacts/CeloBridgeAdapter.json';
 import * as CurveLiquidityProvider from '../test/generated-artifacts/CurveLiquidityProvider.json';
 import * as ERC1155OrdersFeature from '../test/generated-artifacts/ERC1155OrdersFeature.json';
@@ -38,6 +39,7 @@ import * as FundRecoveryFeature from '../test/generated-artifacts/FundRecoveryFe
 import * as IBatchFillNativeOrdersFeature from '../test/generated-artifacts/IBatchFillNativeOrdersFeature.json';
 import * as IBootstrapFeature from '../test/generated-artifacts/IBootstrapFeature.json';
 import * as IBridgeAdapter from '../test/generated-artifacts/IBridgeAdapter.json';
+import * as IBundleSwapFeature from '../test/generated-artifacts/IBundleSwapFeature.json';
 import * as IERC1155OrdersFeature from '../test/generated-artifacts/IERC1155OrdersFeature.json';
 import * as IERC1155Token from '../test/generated-artifacts/IERC1155Token.json';
 import * as IERC165Feature from '../test/generated-artifacts/IERC165Feature.json';
@@ -233,6 +235,7 @@ export const artifacts = {
     TransformerDeployer: TransformerDeployer as ContractArtifact,
     BatchFillNativeOrdersFeature: BatchFillNativeOrdersFeature as ContractArtifact,
     BootstrapFeature: BootstrapFeature as ContractArtifact,
+    BundleSwapFeature: BundleSwapFeature as ContractArtifact,
     ERC165Feature: ERC165Feature as ContractArtifact,
     FundRecoveryFeature: FundRecoveryFeature as ContractArtifact,
     LiquidityProviderFeature: LiquidityProviderFeature as ContractArtifact,
@@ -248,6 +251,7 @@ export const artifacts = {
     UniswapV3Feature: UniswapV3Feature as ContractArtifact,
     IBatchFillNativeOrdersFeature: IBatchFillNativeOrdersFeature as ContractArtifact,
     IBootstrapFeature: IBootstrapFeature as ContractArtifact,
+    IBundleSwapFeature: IBundleSwapFeature as ContractArtifact,
     IERC1155OrdersFeature: IERC1155OrdersFeature as ContractArtifact,
     IERC165Feature: IERC165Feature as ContractArtifact,
     IERC721OrdersFeature: IERC721OrdersFeature as ContractArtifact,
