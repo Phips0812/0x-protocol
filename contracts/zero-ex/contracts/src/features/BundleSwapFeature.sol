@@ -50,6 +50,9 @@ contract BundleSwapFeature is
         _registerFeatureFunction(this.bundleSwap.selector);
         return LibMigrate.MIGRATE_SUCCESS;
     }
+
+    // TODO: for gas efficiency it could make sense to also create separate bundleSwapJustEthInput and
+    //       bundleSwapNoEthInput (this one could use delegatecall) methods
     
     function bundleSwap(
         Swap[] calldata swaps,
@@ -58,71 +61,119 @@ contract BundleSwapFeature is
         uint256 length = swaps.length;
         returnResults = new Result[](length);
 
-        uint256 valueUsed = 0;
+        uint256 value = msg.value;
 
         for (uint256 i = 0; i < length; ++i) {
             Swap calldata swap = swaps[i];
-            Result memory result = returnResults[i];
+            Result memory result = _swap(swap);
+            returnResults[i] = result;
 
-            uint256 inputTokenBalanceBefore = _getInputTokenBalance(swap.inputToken);
-
-            if (address(swap.inputToken) == ETH_TOKEN_ADDRESS) {
-                valueUsed += swap.inputTokenAmount;
-                if (valueUsed > msg.value) {
-                    // ErrorBehaviour exception - ETH leak
-                    revert("BundleSwapFeature::bundleSwap/ETH_LEAK");
+            if (result.success) {
+                if (address(swap.inputToken) == ETH_TOKEN_ADDRESS) {
+                    value -= swap.inputTokenAmount;
                 }
-
-                uint256 outputTokenBalanceBefore = swap.outputToken.balanceOf(address(this));
-
-                // address(this) = address of ZeroExProxy since the proxy is using delegatecall
-                (result.success, result.returnData) = address(this).call{value: swap.inputTokenAmount}(swap.data);
-
-                if (result.success) {
-                    uint256 outputTokenBalanceAfter = swap.outputToken.balanceOf(address(this));
-                    bool transferSuccess = swap.outputToken.transfer(msg.sender, outputTokenBalanceAfter - outputTokenBalanceBefore);
-                    if (!transferSuccess) {
-                        // ErrorBehaviour exception - Failed to return token
-                        revert("BundleSwapFeature::bundleSwap/OUTPUT_TOKEN_TRANSFER_FAILED");
-                    }
+                if (address(swap.outputToken) == ETH_TOKEN_ADDRESS) {
+                    value += result.outputTokenAmount;
                 }
             } else {
-                // address(this) = address of ZeroExProxy since the proxy is using delegatecall
-                (result.success, result.returnData) = address(this).delegatecall(swap.data);
-            }
+                // cannot ErrorBehaviour.STOP or CONTINUE - always has to revert to not lose sent ETH
+                if (address(swap.inputToken) == ETH_TOKEN_ADDRESS) {
+                    revert("BundleSwapFeature::bundleSwap/SELL_ETH_REVERTED");
+                }
 
-            if (!result.success) {
-                if (errorBehaviour == ErrorBehaviour.REVERT) {
+                // also revert if first trade
+                if (errorBehaviour == ErrorBehaviour.REVERT || length == 0) {
                     result.returnData.rrevert();
                 }
-
-                uint256 inputTokenBalanceAfter = _getInputTokenBalance(swap.inputToken);
-                if (inputTokenBalanceBefore != inputTokenBalanceAfter) {
-                    revert("BundleSwapFeature::bundleSwap/INPUT_TOKEN_LEAK");
-                }
-
+                _returnInputTokenOnError(swap);
                 if (errorBehaviour == ErrorBehaviour.STOP) {
-                    break;
+                    break; // break loop and return senders eth
                 }
             }
         }
 
-        if (valueUsed < msg.value) {
-            // Transfer not used ETH back.
-            (bool success, bytes memory revertData) = msg.sender.call{value: msg.value - valueUsed}("");
+        if (value > 0) {
+            // Transfer remaining ETH back.
+            (bool success, bytes memory revertData) = msg.sender.call{value: value}("");
             if (!success) {
                 revertData.rrevert();
             }
         }
     }
 
-    /// @dev Returns either ETH balance of this if input token is ETH because ETH is sent with the tx or the token
-    ///      balance of msg.sender.
-    function _getInputTokenBalance(IERC20Token token) private view returns (uint256) {
+    function _swap(Swap calldata swap) public payable returns (Result memory result) {
+        bool success = _getInputToken(swap);
+        if (success) {
+            result = _callFeature(swap);
+            _returnOutputToken(swap, result.outputTokenAmount);
+        }
+    }
+
+    function _getInputToken(Swap calldata swap) private returns (bool success) {
+        // TODO: think about transfer tax tokens
+
+        if (address(swap.inputToken) != ETH_TOKEN_ADDRESS) {
+            success = swap.inputToken.transferFrom(
+                msg.sender,
+                address(this),
+                swap.inputTokenAmount
+            );
+        } else {
+            success = true;
+        }
+    }
+
+    function _callFeature(Swap calldata swap) private returns (Result memory result) {
+        uint256 inputTokenBalanceBefore = _getBalance(swap.inputToken);
+        uint256 outputTokenBalanceBefore = _getBalance(swap.outputToken);
+
+        if (address(swap.inputToken) == ETH_TOKEN_ADDRESS) {
+            (result.success, result.returnData) = address(this).call{value: swap.inputTokenAmount}(
+                swap.data
+            );
+        } else {
+            (result.success, result.returnData) = address(this).call(
+                swap.data
+            );
+        }
+
+        if (result.success) {
+            uint256 outputTokenBalanceAfter = _getBalance(swap.outputToken);
+            result.outputTokenAmount = outputTokenBalanceAfter - outputTokenBalanceBefore;
+        } else {
+            uint256 inputTokenBalanceAfter = _getBalance(swap.inputToken);
+            if (inputTokenBalanceAfter < inputTokenBalanceBefore) {
+                revert("BundleSwapFeature::_callFeature/INPUT_TOKEN_LEAK");
+            }
+            result.outputTokenAmount = 0;
+        }
+    }
+
+    function _returnOutputToken(Swap calldata swap, uint256 amount) private {
+        if (address(swap.outputToken) != ETH_TOKEN_ADDRESS && amount > 0) {
+            bool success = swap.outputToken.transfer(msg.sender, amount);
+
+            if (!success) {
+                // ErrorBehaviour exception - Failed to return token
+                revert("BundleSwapFeature::bundleSwap/OUTPUT_TOKEN_TRANSFER_FAILED");
+            }
+        }
+    }
+
+    function _returnInputTokenOnError(Swap calldata swap) private {
+        if (address(swap.inputToken) != ETH_TOKEN_ADDRESS) {
+            swap.inputToken.transfer(
+                msg.sender,
+                swap.inputTokenAmount
+            );
+        }
+    }
+
+    function _getBalance(IERC20Token token) private view returns (uint256) {
         if (address(token) == ETH_TOKEN_ADDRESS) {
             return address(this).balance;
         } else {
-            return token.balanceOf(msg.sender);
+            return token.balanceOf(address(this));
         }
     }
 }

@@ -34,9 +34,7 @@ interface IBundleSwapFeature {
     struct Result {
         bool success;
         bytes returnData;
-        bytes4 testSelector;
-        address testAddress;
-        address testAddress2;
+        uint256 outputTokenAmount;
     }
 
     /// @dev Behaviour in case a swap fails.
