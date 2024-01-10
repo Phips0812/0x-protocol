@@ -156,6 +156,7 @@ import * as PermissionlessTransformerDeployer from '../test/generated-artifacts/
 import * as PolygonBridgeAdapter from '../test/generated-artifacts/PolygonBridgeAdapter.json';
 import * as PositiveSlippageFeeTransformer from '../test/generated-artifacts/PositiveSlippageFeeTransformer.json';
 import * as SimpleFunctionRegistryFeature from '../test/generated-artifacts/SimpleFunctionRegistryFeature.json';
+import * as TestBundleSwapErrorsERC20Token from '../test/generated-artifacts/TestBundleSwapErrorsERC20Token.json';
 import * as TestCurve from '../test/generated-artifacts/TestCurve.json';
 import * as TestDelegateCaller from '../test/generated-artifacts/TestDelegateCaller.json';
 import * as TestFeeCollectorController from '../test/generated-artifacts/TestFeeCollectorController.json';
@@ -410,6 +411,7 @@ export const artifacts = {
     TestUniswapV2Pool: TestUniswapV2Pool as ContractArtifact,
     TestUniswapV3Factory: TestUniswapV3Factory as ContractArtifact,
     TestUniswapV3Pool: TestUniswapV3Pool as ContractArtifact,
+    TestBundleSwapErrorsERC20Token: TestBundleSwapErrorsERC20Token as ContractArtifact,
     TestMintableERC1155Token: TestMintableERC1155Token as ContractArtifact,
     TestMintableERC20Token: TestMintableERC20Token as ContractArtifact,
     TestMintableERC721Token: TestMintableERC721Token as ContractArtifact,

@@ -201,6 +201,7 @@
         "./contracts/test/integration/TestUniswapV2Pool.sol",
         "./contracts/test/integration/TestUniswapV3Factory.sol",
         "./contracts/test/integration/TestUniswapV3Pool.sol",
+        "./contracts/test/tokens/TestBundleSwapErrorsERC20Token.sol",
         "./contracts/test/tokens/TestMintableERC1155Token.sol",
         "./contracts/test/tokens/TestMintableERC20Token.sol",
         "./contracts/test/tokens/TestMintableERC721Token.sol",

@@ -155,7 +155,7 @@ contract BundleSwapFeature is
 
             if (!success) {
                 // ErrorBehaviour exception - Failed to return token
-                revert("BundleSwapFeature::bundleSwap/OUTPUT_TOKEN_TRANSFER_FAILED");
+                revert("BundleSwapFeature::_returnOutputToken/OUTPUT_TOKEN_RETURN_FAILED");
             }
         }
     }

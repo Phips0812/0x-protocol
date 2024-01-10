@@ -24,6 +24,7 @@ import {BundleSwapFeatureContract} from "../generated-wrappers/bundle_swap_featu
 import {BigNumber, hexUtils} from "@0x/utils";
 import {TestUniswapV3PoolContract} from "../generated-wrappers/test_uniswap_v3_pool";
 import {LogEntry, LogWithDecodedArgs} from "ethereum-types";
+import {TestBundleSwapErrorsERC20TokenContract} from "../generated-wrappers/test_bundle_swap_errors_erc20_token";
 
 interface TransferEvent {
     token: string;
@@ -69,6 +70,7 @@ blockchainTests.resets('BundleSwapFeature', env => {
     let dai: TestMintableERC20TokenContract;
     let shib: TestMintableERC20TokenContract;
     let zrx: TestMintableERC20TokenContract;
+    let transferErrorToken: TestBundleSwapErrorsERC20TokenContract;
     let weth: TestWethContract;
     let owner: string;
     let maker: string;
@@ -96,12 +98,12 @@ blockchainTests.resets('BundleSwapFeature', env => {
             .awaitTransactionSuccessAsync();
     }
 
-    function isWethContract(t: TestMintableERC20TokenContract | TestWethContract): t is TestWethContract {
+    function isWethContract(t: TestMintableERC20TokenContract | TestWethContract | TestBundleSwapErrorsERC20TokenContract): t is TestWethContract {
         return !!(t as any).deposit;
     }
 
     async function mintToAsync(
-        token: TestMintableERC20TokenContract | TestWethContract,
+        token: TestMintableERC20TokenContract | TestWethContract | TestBundleSwapErrorsERC20TokenContract,
         recipient: string,
         amount: BigNumber,
     ): Promise<void> {
@@ -113,8 +115,8 @@ blockchainTests.resets('BundleSwapFeature', env => {
     }
 
     async function createUniswapV3PoolAsync(
-        token0: TestMintableERC20TokenContract | TestWethContract,
-        token1: TestMintableERC20TokenContract | TestWethContract,
+        token0: TestMintableERC20TokenContract | TestWethContract | TestBundleSwapErrorsERC20TokenContract,
+        token1: TestMintableERC20TokenContract | TestWethContract | TestBundleSwapErrorsERC20TokenContract,
         balance0: BigNumber = toBaseUnitAmount(10),
         balance1: BigNumber = toBaseUnitAmount(10),
     ): Promise<TestUniswapV3PoolContract> {
@@ -132,7 +134,7 @@ blockchainTests.resets('BundleSwapFeature', env => {
     }
 
     function getUniswapV3MultiHopEncodedPath(
-        tokens_: Array<TestMintableERC20TokenContract | TestWethContract>,
+        tokens_: Array<TestMintableERC20TokenContract | TestWethContract | TestBundleSwapErrorsERC20TokenContract>,
     ): string {
         const elems: string[] = [];
         tokens_.forEach((t, i) => {
@@ -145,7 +147,7 @@ blockchainTests.resets('BundleSwapFeature', env => {
     }
 
     function getUniswapV3Swap(
-        tokens: Array<TestMintableERC20TokenContract | TestWethContract>,
+        tokens: Array<TestMintableERC20TokenContract | TestWethContract | TestBundleSwapErrorsERC20TokenContract>,
         sellEth = false,
         receiveEth = false,
         sellAmount: BigNumber = getRandomInteger(1, toBaseUnitAmount(1)),
@@ -288,6 +290,12 @@ blockchainTests.resets('BundleSwapFeature', env => {
             env.provider,
             env.txDefaults,
             artifacts,
+        );
+        transferErrorToken = await TestBundleSwapErrorsERC20TokenContract.deployFrom0xArtifactAsync(
+            artifacts.TestBundleSwapErrorsERC20Token,
+            env.provider,
+            env.txDefaults,
+            artifacts
         );
 
         await Promise.all([
@@ -628,6 +636,18 @@ blockchainTests.resets('BundleSwapFeature', env => {
     });
 
     describe('additional token handling', () => {
-        // TODO: OUTPUT_TOKEN_TRANSFER_FAILED
+        it('output token return failed', async () => {
+            // amount of error token in pool has to be 3132 because the token contract will return false on transfer
+            // in this case. Test pool always return full amount.
+            await createUniswapV3PoolAsync(dai, transferErrorToken, toBaseUnitAmount(10), new BigNumber(3132));
+            const uniV3Swap1 = getUniswapV3Swap([dai, transferErrorToken]);
+            await mintToAsync(dai, taker, uniV3Swap1.inputTokenAmount);
+
+            const txPromise = bundleSwap.bundleSwap([
+                uniV3Swap1,
+            ], ErrorBehaviour.REVERT).awaitTransactionSuccessAsync({from: taker});
+
+            return expect(txPromise).to.revertWith('BundleSwapFeature::_returnOutputToken/OUTPUT_TOKEN_RETURN_FAILED');
+        });
     });
 });
