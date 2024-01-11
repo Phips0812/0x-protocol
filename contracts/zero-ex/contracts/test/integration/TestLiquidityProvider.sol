@@ -88,6 +88,6 @@ contract TestLiquidityProvider {
         bytes calldata // auxiliaryData
     ) external returns (uint256) {
         emit SellTokenForEth(inputToken, recipient, minBuyAmount, IERC20Token(inputToken).balanceOf(address(this)));
-        recipient.transfer(address(this).balance);
+        payable(address(recipient)).transfer(address(this).balance);
     }
 }

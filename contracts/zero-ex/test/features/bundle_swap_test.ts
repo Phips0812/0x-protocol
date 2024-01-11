@@ -25,6 +25,12 @@ import {BigNumber, hexUtils} from "@0x/utils";
 import {TestUniswapV3PoolContract} from "../generated-wrappers/test_uniswap_v3_pool";
 import {LogEntry, LogWithDecodedArgs} from "ethereum-types";
 import {TestBundleSwapErrorsERC20TokenContract} from "../generated-wrappers/test_bundle_swap_errors_erc20_token";
+import {LiquidityProviderSandboxContract} from "../generated-wrappers/liquidity_provider_sandbox";
+import {
+    TestLiquidityProviderContract,
+    TestLiquidityProviderEvents
+} from "../generated-wrappers/test_liquidity_provider";
+import {LiquidityProviderFeatureContract} from "../../generated-wrappers/liquidity_provider_feature";
 
 interface TransferEvent {
     token: string;
@@ -46,9 +52,12 @@ enum ErrorBehaviour {
     CONTINUE
 }
 
-interface UniV3VerifyConfig {
+interface VerifyConfig {
     swap: Swap;
-    pool?: TestUniswapV3PoolContract;
+    outputFirst?: boolean // e.g. UniV3 first returns output token then receives input token (order of Transfer events)
+    deposit?: boolean; // deposit ETH to WETH
+    withdraw?: boolean; // withdraw ETH from WETH
+    source?: TestUniswapV3PoolContract | TestLiquidityProviderContract;
     fail?: boolean;
 }
 
@@ -60,13 +69,13 @@ blockchainTests.resets('BundleSwapFeature', env => {
     let zeroEx: IZeroExContract;
     let bundleSwap: BundleSwapFeatureContract;
     let flashWalletAddress: string;
-    // TODO
-    // let sandbox: LiquidityProviderSandboxContract;
-    // let liquidityProvider: TestLiquidityProviderContract;
-    // let sushiFactory: TestUniswapV2FactoryContract;
-    // let uniV2Factory: TestUniswapV2FactoryContract;
     let uniV3Factory: TestUniswapV3FactoryContract;
     let uniV3Feature: UniswapV3FeatureContract;
+    // let sandbox: LiquidityProviderSandboxContract;
+    let liquidityProviderFeature: LiquidityProviderFeatureContract;
+    let liquidityProvider: TestLiquidityProviderContract;
+    // let sushiFactory: TestUniswapV2FactoryContract;
+    // let uniV2Factory: TestUniswapV2FactoryContract;
     let dai: TestMintableERC20TokenContract;
     let shib: TestMintableERC20TokenContract;
     let zrx: TestMintableERC20TokenContract;
@@ -96,6 +105,33 @@ blockchainTests.resets('BundleSwapFeature', env => {
         await new IOwnableFeatureContract(zeroEx.address, env.provider, env.txDefaults)
             .migrate(uniV3Feature.address, uniV3Feature.migrate().getABIEncodedTransactionData(), owner)
             .awaitTransactionSuccessAsync();
+    }
+
+    async function migrateLiquidityProviderContractsAsync(): Promise<void> {
+        const sandbox = await LiquidityProviderSandboxContract.deployFrom0xArtifactAsync(
+            artifacts.LiquidityProviderSandbox,
+            env.provider,
+            env.txDefaults,
+            artifacts,
+            zeroEx.address,
+        );
+        liquidityProviderFeature = await LiquidityProviderFeatureContract.deployFrom0xArtifactAsync(
+            artifacts.LiquidityProviderFeature,
+            env.provider,
+            env.txDefaults,
+            artifacts,
+            sandbox.address,
+        );
+        await new IOwnableFeatureContract(zeroEx.address, env.provider, env.txDefaults, abis)
+            .migrate(liquidityProviderFeature.address, liquidityProviderFeature.migrate().getABIEncodedTransactionData(), owner)
+            .awaitTransactionSuccessAsync();
+
+        liquidityProvider = await TestLiquidityProviderContract.deployFrom0xArtifactAsync(
+            artifacts.TestLiquidityProvider,
+            env.provider,
+            env.txDefaults,
+            artifacts,
+        );
     }
 
     function isWethContract(t: TestMintableERC20TokenContract | TestWethContract | TestBundleSwapErrorsERC20TokenContract): t is TestWethContract {
@@ -190,27 +226,56 @@ blockchainTests.resets('BundleSwapFeature', env => {
         }
     }
 
-    function verifyBundleSwapUniV3EventsFromLogs(
-        uniV3VerifyConfigs: UniV3VerifyConfig[],
+    async function fundLiquidityProvider(
+        token: 'ETH' | TestMintableERC20TokenContract | TestWethContract | TestBundleSwapErrorsERC20TokenContract,
+        balance: BigNumber = getRandomInteger(1, toBaseUnitAmount(1)),
+    ): Promise<void> {
+        if (token === 'ETH') {
+            await env.web3Wrapper.sendTransactionAsync({from: owner, value: balance});
+        } else {
+            await mintToAsync(token, liquidityProvider.address, balance);
+        }
+    }
+
+    function getLiquidityProviderSwap(
+        liquidityProvider: TestLiquidityProviderContract,
+        inputToken: 'ETH' | TestMintableERC20TokenContract | TestWethContract | TestBundleSwapErrorsERC20TokenContract,
+        outputToken: 'ETH' | TestMintableERC20TokenContract | TestWethContract | TestBundleSwapErrorsERC20TokenContract,
+        sellAmount: BigNumber = getRandomInteger(1, toBaseUnitAmount(1)),
+        minBuyAmount: BigNumber = constants.ZERO_AMOUNT
+    ): Swap {
+        return {
+            inputToken: inputToken === 'ETH' ? ETH_TOKEN_ADDRESS : inputToken.address,
+            outputToken: outputToken === 'ETH' ? ETH_TOKEN_ADDRESS : outputToken.address,
+            inputTokenAmount: sellAmount,
+            data: liquidityProviderFeature.sellToLiquidityProvider(
+                inputToken === 'ETH' ? ETH_TOKEN_ADDRESS : inputToken.address,
+                outputToken === 'ETH' ? ETH_TOKEN_ADDRESS : outputToken.address,
+                liquidityProvider.address,
+                constants.NULL_ADDRESS,
+                sellAmount,
+                minBuyAmount,
+                constants.NULL_BYTES
+            ).getABIEncodedTransactionData()
+        };
+    }
+
+    function verifyBundleSwapEventsFromLogs(
+        verifyConfigs: VerifyConfig[],
         logs: LogEntry[]
     ): void {
         const expectedDepositEvents: {owner: string}[] = [];
         const expectedWithdrawEvents: {owner: string}[] = [];
         const expectedTransferEvents: TransferEvent[] = [];
 
-        uniV3VerifyConfigs.forEach(config => {
+        verifyConfigs.forEach(config => {
             let inputToken = config.swap.inputToken;
-            if (config.swap.inputToken === ETH_TOKEN_ADDRESS) {
+            if (config.deposit) {
                 inputToken = weth.address;
-            }
-            let outputToken = config.swap.outputToken;
-            if (config.swap.outputToken === ETH_TOKEN_ADDRESS) {
-                outputToken = weth.address;
+                expectedDepositEvents.push({ owner: zeroEx.address });
             }
 
-            if (config.swap.inputToken === ETH_TOKEN_ADDRESS) {
-                expectedDepositEvents.push({ owner: zeroEx.address });
-            } else {
+            if (config.swap.inputToken !== ETH_TOKEN_ADDRESS) {
                 expectedTransferEvents.push({
                     token: inputToken,
                     from: taker,
@@ -220,23 +285,55 @@ blockchainTests.resets('BundleSwapFeature', env => {
             }
 
             if (!config.fail) {
-                expectedTransferEvents.push(
-                    {
-                        token: outputToken,
-                        from: config.pool!.address,
-                        to: zeroEx.address,
-                    },
-                    {
-                        token: inputToken,
-                        from: zeroEx.address,
-                        to: config.pool!.address,
-                        value: config.swap.inputTokenAmount,
-                    },
-                );
-
-                if (config.swap.outputToken === ETH_TOKEN_ADDRESS) {
+                let outputToken = config.swap.outputToken;
+                if (config.withdraw) {
+                    outputToken = weth.address;
                     expectedWithdrawEvents.push({ owner: zeroEx.address });
+                }
+
+                if (!config.outputFirst) {
+                    if (inputToken !== ETH_TOKEN_ADDRESS) {
+                        expectedTransferEvents.push(
+                            {
+                                token: inputToken,
+                                from: zeroEx.address,
+                                to: config.source!.address,
+                                value: config.swap.inputTokenAmount,
+                            },
+                        );
+                    }
+                    if (outputToken !== ETH_TOKEN_ADDRESS) {
+                        expectedTransferEvents.push(
+                            {
+                                token: outputToken,
+                                from: config.source!.address,
+                                to: zeroEx.address,
+                            },
+                        );
+                    }
                 } else {
+                    if (outputToken !== ETH_TOKEN_ADDRESS) {
+                        expectedTransferEvents.push(
+                            {
+                                token: outputToken,
+                                from: config.source!.address,
+                                to: zeroEx.address,
+                            },
+                        );
+                    }
+                    if (inputToken !== ETH_TOKEN_ADDRESS) {
+                        expectedTransferEvents.push(
+                            {
+                                token: inputToken,
+                                from: zeroEx.address,
+                                to: config.source!.address,
+                                value: config.swap.inputTokenAmount,
+                            },
+                        );
+                    }
+                }
+
+                if (config.swap.outputToken !== ETH_TOKEN_ADDRESS) {
                     expectedTransferEvents.push({
                         token: outputToken,
                         from: zeroEx.address,
@@ -307,10 +404,10 @@ blockchainTests.resets('BundleSwapFeature', env => {
             ),
         ]);
         // TODO
-        // await migrateOtcOrdersFeatureAsync();
-        // await migrateLiquidityProviderContractsAsync();
-        // await migrateUniswapV2ContractsAsync();
         await migrateUniswapV3ContractsAsync();
+        await migrateLiquidityProviderContractsAsync();
+        // await migrateOtcOrdersFeatureAsync();
+        // await migrateUniswapV2ContractsAsync();
         transformerNonce = await env.web3Wrapper.getAccountNonceAsync(owner);
         await TestMintTokenERC20TransformerContract.deployFrom0xArtifactAsync(
             artifacts.TestMintTokenERC20Transformer,
@@ -344,8 +441,36 @@ blockchainTests.resets('BundleSwapFeature', env => {
                     uniV3Swap
                 ], ErrorBehaviour.REVERT).awaitTransactionSuccessAsync({from: taker});
 
-                verifyBundleSwapUniV3EventsFromLogs([
-                    { swap: uniV3Swap, pool: uniV3},
+                verifyBundleSwapEventsFromLogs([
+                    { swap: uniV3Swap, outputFirst: true, source: uniV3 },
+                ], tx.logs);
+            });
+
+            it('LiquidityProvider', async () => {
+                await fundLiquidityProvider(zrx);
+                const liquidityProviderSwap = getLiquidityProviderSwap(liquidityProvider, dai, zrx);
+                await mintToAsync(dai, taker, liquidityProviderSwap.inputTokenAmount);
+
+                const tx = await bundleSwap.bundleSwap([
+                    liquidityProviderSwap
+                ], ErrorBehaviour.REVERT).awaitTransactionSuccessAsync({from: taker});
+
+                verifyEventsFromLogs(
+                    tx.logs,
+                    [
+                        {
+                            inputToken: dai.address,
+                            outputToken: zrx.address,
+                            recipient: zeroEx.address,
+                            minBuyAmount: constants.ZERO_AMOUNT,
+                            inputTokenBalance: liquidityProviderSwap.inputTokenAmount,
+                        },
+                    ],
+                    TestLiquidityProviderEvents.SellTokenForToken,
+                );
+
+                verifyBundleSwapEventsFromLogs([
+                    { swap: liquidityProviderSwap, source: liquidityProvider },
                 ], tx.logs);
             });
         });
@@ -359,8 +484,34 @@ blockchainTests.resets('BundleSwapFeature', env => {
                     uniV3Swap
                 ], ErrorBehaviour.REVERT).awaitTransactionSuccessAsync({from: taker, value: uniV3Swap.inputTokenAmount});
 
-                verifyBundleSwapUniV3EventsFromLogs([
-                    { swap: uniV3Swap, pool: uniV3},
+                verifyBundleSwapEventsFromLogs([
+                    { swap: uniV3Swap, outputFirst: true, deposit: true, source: uniV3 },
+                ], tx.logs);
+            });
+
+            it('LiquidityProvider', async () => {
+                await fundLiquidityProvider(zrx);
+                const liquidityProviderSwap = getLiquidityProviderSwap(liquidityProvider, 'ETH', zrx);
+
+                const tx = await bundleSwap.bundleSwap([
+                    liquidityProviderSwap
+                ], ErrorBehaviour.REVERT).awaitTransactionSuccessAsync({from: taker, value: liquidityProviderSwap.inputTokenAmount});
+
+                verifyEventsFromLogs(
+                    tx.logs,
+                    [
+                        {
+                            outputToken: zrx.address,
+                            recipient: zeroEx.address,
+                            minBuyAmount: constants.ZERO_AMOUNT,
+                            ethBalance: liquidityProviderSwap.inputTokenAmount,
+                        },
+                    ],
+                    TestLiquidityProviderEvents.SellEthForToken,
+                );
+
+                verifyBundleSwapEventsFromLogs([
+                    { swap: liquidityProviderSwap, source: liquidityProvider },
                 ], tx.logs);
             });
         });
@@ -376,8 +527,35 @@ blockchainTests.resets('BundleSwapFeature', env => {
                     uniV3Swap
                 ], ErrorBehaviour.REVERT).awaitTransactionSuccessAsync({from: taker});
 
-                verifyBundleSwapUniV3EventsFromLogs([
-                    { swap: uniV3Swap, pool: uniV3},
+                verifyBundleSwapEventsFromLogs([
+                    { swap: uniV3Swap, outputFirst: true, withdraw: true, source: uniV3},
+                ], tx.logs);
+            });
+
+            it('LiquidityProvider', async () => {
+                await fundLiquidityProvider('ETH');
+                const liquidityProviderSwap = getLiquidityProviderSwap(liquidityProvider, dai, 'ETH');
+                await mintToAsync(dai, taker, liquidityProviderSwap.inputTokenAmount);
+
+                const tx = await bundleSwap.bundleSwap([
+                    liquidityProviderSwap
+                ], ErrorBehaviour.REVERT).awaitTransactionSuccessAsync({from: taker});
+
+                verifyEventsFromLogs(
+                    tx.logs,
+                    [
+                        {
+                            inputToken: dai.address,
+                            recipient: zeroEx.address,
+                            minBuyAmount: constants.ZERO_AMOUNT,
+                            inputTokenBalance: liquidityProviderSwap.inputTokenAmount,
+                        },
+                    ],
+                    TestLiquidityProviderEvents.SellTokenForEth,
+                );
+
+                verifyBundleSwapEventsFromLogs([
+                    { swap: liquidityProviderSwap, source: liquidityProvider },
                 ], tx.logs);
             });
         });
@@ -403,10 +581,35 @@ blockchainTests.resets('BundleSwapFeature', env => {
                     uniV3SwapShibZrx
                 ], ErrorBehaviour.REVERT).awaitTransactionSuccessAsync({from: taker});
 
-                verifyBundleSwapUniV3EventsFromLogs([
-                    { swap: uniV3SwapDaiShib, pool: uniV3DaiShib},
-                    { swap: uniV3SwapDaiZrx, pool: uniV3DaiZrx},
-                    { swap: uniV3SwapShibZrx, pool: uniV3ShibZrx}
+                verifyBundleSwapEventsFromLogs([
+                    { swap: uniV3SwapDaiShib, outputFirst: true, source: uniV3DaiShib },
+                    { swap: uniV3SwapDaiZrx, outputFirst: true, source: uniV3DaiZrx },
+                    { swap: uniV3SwapShibZrx, outputFirst: true, source: uniV3ShibZrx }
+                ], tx.logs);
+            });
+
+            it('UniV3, LiquidityProvider', async () => {
+                const uniV3DaiShib = await createUniswapV3PoolAsync(dai, shib);
+                await fundLiquidityProvider(zrx);
+                const uniV3ShibZrx = await createUniswapV3PoolAsync(shib, zrx);
+
+                const uniV3SwapDaiShib = getUniswapV3Swap([dai, shib]);
+                const liquidityProviderSwapDaiZrx = getLiquidityProviderSwap(liquidityProvider, dai, zrx);
+                const uniV3SwapShibZrx = getUniswapV3Swap([shib, zrx]);
+
+                await mintToAsync(dai, taker, BigNumber.sum(uniV3SwapDaiShib.inputTokenAmount, liquidityProviderSwapDaiZrx.inputTokenAmount));
+                await mintToAsync(shib, taker, uniV3SwapShibZrx.inputTokenAmount);
+
+                const tx = await bundleSwap.bundleSwap([
+                    uniV3SwapDaiShib,
+                    liquidityProviderSwapDaiZrx,
+                    uniV3SwapShibZrx
+                ], ErrorBehaviour.REVERT).awaitTransactionSuccessAsync({from: taker});
+
+                verifyBundleSwapEventsFromLogs([
+                    { swap: uniV3SwapDaiShib, outputFirst: true, source: uniV3DaiShib },
+                    { swap: liquidityProviderSwapDaiZrx, source: liquidityProvider },
+                    { swap: uniV3SwapShibZrx, outputFirst: true, source: uniV3ShibZrx }
                 ], tx.logs);
             });
         });
@@ -436,10 +639,10 @@ blockchainTests.resets('BundleSwapFeature', env => {
                     value
                 });
 
-                verifyBundleSwapUniV3EventsFromLogs([
-                    { swap: uniV3SwapWethDai, pool: uniV3WethDai},
-                    { swap: uniV3SwapWethZrx, pool: uniV3WethZrx},
-                    { swap: uniV3SwapWethShib, pool: uniV3WethShib}
+                verifyBundleSwapEventsFromLogs([
+                    { swap: uniV3SwapWethDai, outputFirst: true, deposit: true, source: uniV3WethDai },
+                    { swap: uniV3SwapWethZrx, outputFirst: true, deposit: true, source: uniV3WethZrx },
+                    { swap: uniV3SwapWethShib, outputFirst: true, deposit: true, source: uniV3WethShib }
                 ], tx.logs);
             });
         });
@@ -464,10 +667,10 @@ blockchainTests.resets('BundleSwapFeature', env => {
                     uniV3SwapShibWeth
                 ], ErrorBehaviour.REVERT).awaitTransactionSuccessAsync({from: taker});
 
-                verifyBundleSwapUniV3EventsFromLogs([
-                    { swap: uniV3SwapDaiWeth, pool: uniV3DaiWeth},
-                    { swap: uniV3SwapZrxWeth, pool: uniV3ZrxWeth},
-                    { swap: uniV3SwapShibWeth, pool: uniV3ShibWeth}
+                verifyBundleSwapEventsFromLogs([
+                    { swap: uniV3SwapDaiWeth, outputFirst: true, withdraw: true, source: uniV3DaiWeth },
+                    { swap: uniV3SwapZrxWeth, outputFirst: true, withdraw: true, source: uniV3ZrxWeth },
+                    { swap: uniV3SwapShibWeth, outputFirst: true, withdraw: true, source: uniV3ShibWeth }
                 ], tx.logs);
             });
         });
@@ -493,16 +696,18 @@ blockchainTests.resets('BundleSwapFeature', env => {
                     value: uniV3SwapWethDai.inputTokenAmount
                 });
 
-                verifyBundleSwapUniV3EventsFromLogs([
-                    { swap: uniV3SwapWethDai, pool: uniV3WethDai},
-                    { swap: uniV3SwapWethZrx, pool: uniV3WethZrx},
-                    { swap: uniV3SwapWethShib, pool: uniV3WethShib}
+                verifyBundleSwapEventsFromLogs([
+                    { swap: uniV3SwapWethDai, outputFirst: true, deposit: true, source: uniV3WethDai },
+                    { swap: uniV3SwapWethZrx, outputFirst: true, source: uniV3WethZrx },
+                    { swap: uniV3SwapWethShib, outputFirst: true, source: uniV3WethShib }
                 ], tx.logs);
             });
         });
     });
 
     describe('additional ETH handling', () => {
+        // TODO: ETH_LEAK
+
         it('not all used', async () => {
             const uniV3 = await createUniswapV3PoolAsync(weth, zrx);
             const uniV3Swap = getUniswapV3Swap([weth, zrx], true);
@@ -518,8 +723,8 @@ blockchainTests.resets('BundleSwapFeature', env => {
             // 1 wei sent too much should be returned
             expect(ethBalanceAfter).to.bignumber.eq(ethBalanceBefore.minus(uniV3Swap.inputTokenAmount).minus(tx.gasUsed));
 
-            verifyBundleSwapUniV3EventsFromLogs([
-                { swap: uniV3Swap, pool: uniV3},
+            verifyBundleSwapEventsFromLogs([
+                { swap: uniV3Swap, outputFirst: true, deposit: true, source: uniV3 },
             ], tx.logs);
         });
     });
@@ -576,9 +781,9 @@ blockchainTests.resets('BundleSwapFeature', env => {
 
             expect(shibBalanceAfter).to.bignumber.eq(shibBalanceBefore);
 
-            verifyBundleSwapUniV3EventsFromLogs([
+            verifyBundleSwapEventsFromLogs([
                 { swap: uniV3SwapUnderbought, fail: true},
-                { swap: uniV3Swap, pool: uniV3WethZrx},
+                { swap: uniV3Swap, outputFirst: true, deposit: true, source: uniV3WethZrx},
             ], tx.logs);
         });
 
@@ -628,8 +833,8 @@ blockchainTests.resets('BundleSwapFeature', env => {
             expect(shibBalanceAfter).to.bignumber.eq(shibBalanceBefore);
             expect(ethBalanceAfter).to.bignumber.eq(ethBalanceBefore.minus(tx.gasUsed));
 
-            verifyBundleSwapUniV3EventsFromLogs([
-                { swap: uniV3Swap1, pool: uniV3DaiZrx},
+            verifyBundleSwapEventsFromLogs([
+                { swap: uniV3Swap1, outputFirst: true, source: uniV3DaiZrx},
                 { swap: uniV3SwapUnderbought, fail: true},
             ], tx.logs);
         });

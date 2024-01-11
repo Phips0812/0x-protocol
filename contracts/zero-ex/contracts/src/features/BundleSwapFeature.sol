@@ -16,10 +16,12 @@ pragma solidity ^0.6.5;
 pragma experimental ABIEncoderV2;
 
 import "@0x/contracts-erc20/src/IERC20Token.sol";
+import "@0x/contracts-utils/contracts/src/v06/LibSafeMathV06.sol";
 import "@0x/contracts-utils/contracts/src/v06/errors/LibRichErrorsV06.sol";
 import "@0x/contracts-utils/contracts/src/v06/LibBytesV06.sol";
 import "../fixins/FixinCommon.sol";
 import "../migrations/LibMigrate.sol";
+import "../transformers/LibERC20Transformer.sol";
 import "./interfaces/IFeature.sol";
 import "./interfaces/IBundleSwapFeature.sol";
 import "../IZeroEx.sol";
@@ -31,6 +33,7 @@ contract BundleSwapFeature is
     IBundleSwapFeature,
     FixinCommon
 {
+    using LibSafeMathV06 for uint256;
     using LibBytesV06 for bytes;
     using LibRichErrorsV06 for bytes;
 
@@ -38,8 +41,6 @@ contract BundleSwapFeature is
     string public constant override FEATURE_NAME = "BundleSwap";
     /// @dev Version of this feature.
     uint256 public immutable override FEATURE_VERSION = _encodeVersion(1, 0, 0);
-    /// @dev ETH pseudo-token address.
-    address private constant ETH_TOKEN_ADDRESS = 0xEeeeeEeeeEeEeeEeEeEeeEEEeeeeEeeeeeeeEEeE;
 
     constructor() public FixinCommon() {}
 
@@ -51,9 +52,11 @@ contract BundleSwapFeature is
         return LibMigrate.MIGRATE_SUCCESS;
     }
 
-    // TODO: for gas efficiency it could make sense to also create separate bundleSwapJustEthInput and
+    // TODO (v2): for gas efficiency it could make sense to also create separate bundleSwapJustEthInput and
     //       bundleSwapNoEthInput (this one could use delegatecall) methods
-    
+
+    // TODO (v2): support recipient
+
     function bundleSwap(
         Swap[] calldata swaps,
         ErrorBehaviour errorBehaviour
@@ -69,15 +72,15 @@ contract BundleSwapFeature is
             returnResults[i] = result;
 
             if (result.success) {
-                if (address(swap.inputToken) == ETH_TOKEN_ADDRESS) {
-                    value -= swap.inputTokenAmount;
+                if (LibERC20Transformer.isTokenETH(swap.inputToken)) {
+                    value = value.safeSub(swap.inputTokenAmount);
                 }
-                if (address(swap.outputToken) == ETH_TOKEN_ADDRESS) {
-                    value += result.outputTokenAmount;
+                if (LibERC20Transformer.isTokenETH(swap.outputToken)) {
+                    value = value.safeAdd(result.outputTokenAmount);
                 }
             } else {
                 // cannot ErrorBehaviour.STOP or CONTINUE - always has to revert to not lose sent ETH
-                if (address(swap.inputToken) == ETH_TOKEN_ADDRESS) {
+                if (LibERC20Transformer.isTokenETH(swap.inputToken)) {
                     revert("BundleSwapFeature::bundleSwap/SELL_ETH_REVERTED");
                 }
 
@@ -92,6 +95,9 @@ contract BundleSwapFeature is
             }
         }
 
+        if (value < 0) {
+            revert("BundleSwapFeature::bundleSwap/ETH_LEAK");
+        }
         if (value > 0) {
             // Transfer remaining ETH back.
             (bool success, bytes memory revertData) = msg.sender.call{value: value}("");
@@ -101,7 +107,7 @@ contract BundleSwapFeature is
         }
     }
 
-    function _swap(Swap calldata swap) public payable returns (Result memory result) {
+    function _swap(Swap calldata swap) private returns (Result memory result) {
         bool success = _getInputToken(swap);
         if (success) {
             result = _callFeature(swap);
@@ -112,7 +118,7 @@ contract BundleSwapFeature is
     function _getInputToken(Swap calldata swap) private returns (bool success) {
         // TODO: think about transfer tax tokens
 
-        if (address(swap.inputToken) != ETH_TOKEN_ADDRESS) {
+        if (!LibERC20Transformer.isTokenETH(swap.inputToken)) {
             success = swap.inputToken.transferFrom(
                 msg.sender,
                 address(this),
@@ -127,7 +133,7 @@ contract BundleSwapFeature is
         uint256 inputTokenBalanceBefore = _getBalance(swap.inputToken);
         uint256 outputTokenBalanceBefore = _getBalance(swap.outputToken);
 
-        if (address(swap.inputToken) == ETH_TOKEN_ADDRESS) {
+        if (LibERC20Transformer.isTokenETH(swap.inputToken)) {
             (result.success, result.returnData) = address(this).call{value: swap.inputTokenAmount}(
                 swap.data
             );
@@ -139,7 +145,7 @@ contract BundleSwapFeature is
 
         if (result.success) {
             uint256 outputTokenBalanceAfter = _getBalance(swap.outputToken);
-            result.outputTokenAmount = outputTokenBalanceAfter - outputTokenBalanceBefore;
+            result.outputTokenAmount = outputTokenBalanceAfter.safeSub(outputTokenBalanceBefore);
         } else {
             uint256 inputTokenBalanceAfter = _getBalance(swap.inputToken);
             if (inputTokenBalanceAfter < inputTokenBalanceBefore) {
@@ -150,7 +156,7 @@ contract BundleSwapFeature is
     }
 
     function _returnOutputToken(Swap calldata swap, uint256 amount) private {
-        if (address(swap.outputToken) != ETH_TOKEN_ADDRESS && amount > 0) {
+        if (!LibERC20Transformer.isTokenETH(swap.outputToken) && amount > 0) {
             bool success = swap.outputToken.transfer(msg.sender, amount);
 
             if (!success) {
@@ -161,7 +167,7 @@ contract BundleSwapFeature is
     }
 
     function _returnInputTokenOnError(Swap calldata swap) private {
-        if (address(swap.inputToken) != ETH_TOKEN_ADDRESS) {
+        if (!LibERC20Transformer.isTokenETH(swap.inputToken)) {
             swap.inputToken.transfer(
                 msg.sender,
                 swap.inputTokenAmount
@@ -170,7 +176,7 @@ contract BundleSwapFeature is
     }
 
     function _getBalance(IERC20Token token) private view returns (uint256) {
-        if (address(token) == ETH_TOKEN_ADDRESS) {
+        if (LibERC20Transformer.isTokenETH(token)) {
             return address(this).balance;
         } else {
             return token.balanceOf(address(this));
