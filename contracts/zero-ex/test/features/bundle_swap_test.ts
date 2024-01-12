@@ -21,7 +21,7 @@ import {
 import {TestMintTokenERC20TransformerContract} from "../generated-wrappers/test_mint_token_erc20_transformer";
 import {abis} from "../utils/abis";
 import {BundleSwapFeatureContract} from "../generated-wrappers/bundle_swap_feature";
-import {BigNumber, hexUtils} from "@0x/utils";
+import {BigNumber, hexUtils, NULL_ADDRESS} from "@0x/utils";
 import {TestUniswapV3PoolContract} from "../generated-wrappers/test_uniswap_v3_pool";
 import {LogEntry, LogWithDecodedArgs} from "ethereum-types";
 import {TestBundleSwapErrorsERC20TokenContract} from "../generated-wrappers/test_bundle_swap_errors_erc20_token";
@@ -31,6 +31,9 @@ import {
     TestLiquidityProviderEvents
 } from "../generated-wrappers/test_liquidity_provider";
 import {LiquidityProviderFeatureContract} from "../../generated-wrappers/liquidity_provider_feature";
+import {OtcOrdersFeatureContract} from "../generated-wrappers/otc_orders_feature";
+import {OtcOrder} from "@0x/protocol-utils";
+import {computeOtcOrderFilledAmounts, getRandomOtcOrder} from "../utils/orders";
 
 interface TransferEvent {
     token: string;
@@ -57,7 +60,7 @@ interface VerifyConfig {
     outputFirst?: boolean // e.g. UniV3 first returns output token then receives input token (order of Transfer events)
     deposit?: boolean; // deposit ETH to WETH
     withdraw?: boolean; // withdraw ETH from WETH
-    source?: TestUniswapV3PoolContract | TestLiquidityProviderContract;
+    source?: {address: string};
     fail?: boolean;
 }
 
@@ -74,6 +77,7 @@ blockchainTests.resets('BundleSwapFeature', env => {
     // let sandbox: LiquidityProviderSandboxContract;
     let liquidityProviderFeature: LiquidityProviderFeatureContract;
     let liquidityProvider: TestLiquidityProviderContract;
+    let otcOrdersFeature: OtcOrdersFeatureContract;
     // let sushiFactory: TestUniswapV2FactoryContract;
     // let uniV2Factory: TestUniswapV2FactoryContract;
     let dai: TestMintableERC20TokenContract;
@@ -132,6 +136,20 @@ blockchainTests.resets('BundleSwapFeature', env => {
             env.txDefaults,
             artifacts,
         );
+    }
+
+    async function migrateOtcOrdersFeatureAsync(): Promise<void> {
+        otcOrdersFeature = await OtcOrdersFeatureContract.deployFrom0xArtifactAsync(
+            artifacts.OtcOrdersFeature,
+            env.provider,
+            env.txDefaults,
+            artifacts,
+            zeroEx.address,
+            weth.address,
+        );
+        await new IOwnableFeatureContract(zeroEx.address, env.provider, env.txDefaults)
+            .migrate(otcOrdersFeature.address, otcOrdersFeature.migrate().getABIEncodedTransactionData(), owner)
+            .awaitTransactionSuccessAsync();
     }
 
     function isWethContract(t: TestMintableERC20TokenContract | TestWethContract | TestBundleSwapErrorsERC20TokenContract): t is TestWethContract {
@@ -238,26 +256,73 @@ blockchainTests.resets('BundleSwapFeature', env => {
     }
 
     function getLiquidityProviderSwap(
-        liquidityProvider: TestLiquidityProviderContract,
         inputToken: 'ETH' | TestMintableERC20TokenContract | TestWethContract | TestBundleSwapErrorsERC20TokenContract,
         outputToken: 'ETH' | TestMintableERC20TokenContract | TestWethContract | TestBundleSwapErrorsERC20TokenContract,
         sellAmount: BigNumber = getRandomInteger(1, toBaseUnitAmount(1)),
         minBuyAmount: BigNumber = constants.ZERO_AMOUNT
     ): Swap {
+        const calldata = liquidityProviderFeature.sellToLiquidityProvider(
+            inputToken === 'ETH' ? ETH_TOKEN_ADDRESS : inputToken.address,
+            outputToken === 'ETH' ? ETH_TOKEN_ADDRESS : outputToken.address,
+            liquidityProvider.address,
+            constants.NULL_ADDRESS,
+            sellAmount,
+            minBuyAmount,
+            constants.NULL_BYTES
+        ).getABIEncodedTransactionData();
+
         return {
             inputToken: inputToken === 'ETH' ? ETH_TOKEN_ADDRESS : inputToken.address,
             outputToken: outputToken === 'ETH' ? ETH_TOKEN_ADDRESS : outputToken.address,
             inputTokenAmount: sellAmount,
-            data: liquidityProviderFeature.sellToLiquidityProvider(
-                inputToken === 'ETH' ? ETH_TOKEN_ADDRESS : inputToken.address,
-                outputToken === 'ETH' ? ETH_TOKEN_ADDRESS : outputToken.address,
-                liquidityProvider.address,
-                constants.NULL_ADDRESS,
-                sellAmount,
-                minBuyAmount,
-                constants.NULL_BYTES
-            ).getABIEncodedTransactionData()
+            data: calldata
         };
+    }
+
+    async function getOtcOrderSwap(
+        takerToken: 'ETH' | TestMintableERC20TokenContract | TestWethContract | TestBundleSwapErrorsERC20TokenContract,
+        makerToken: 'ETH' | TestMintableERC20TokenContract | TestWethContract | TestBundleSwapErrorsERC20TokenContract,
+        takerTokenAmount: BigNumber = getRandomInteger(1, toBaseUnitAmount(1)),
+        makerTokenAmount: BigNumber = getRandomInteger(1, toBaseUnitAmount(1)),
+    ): Promise<[OtcOrder, Swap]> {
+        const order = getRandomOtcOrder({
+            maker,
+            verifyingContract: zeroEx.address,
+            chainId: 1337,
+            takerToken: takerToken === 'ETH' ? ETH_TOKEN_ADDRESS : takerToken.address,
+            makerToken: makerToken === 'ETH' ? weth.address : makerToken.address,
+            takerAmount: takerTokenAmount,
+            makerAmount: makerTokenAmount,
+            taker: constants.NULL_ADDRESS,
+            txOrigin: taker,
+        });
+
+        let calldata;
+        if (takerToken === 'ETH') {
+            calldata = otcOrdersFeature.fillOtcOrderWithEth(
+                order,
+                await order.getSignatureWithProviderAsync(env.provider),
+            ).getABIEncodedTransactionData();
+        } else if (makerToken === 'ETH') {
+            calldata = otcOrdersFeature.fillOtcOrderForEth(
+                order,
+                await order.getSignatureWithProviderAsync(env.provider),
+                takerTokenAmount
+            ).getABIEncodedTransactionData();
+        } else {
+            calldata = otcOrdersFeature.fillOtcOrder(
+                order,
+                await order.getSignatureWithProviderAsync(env.provider),
+                takerTokenAmount
+            ).getABIEncodedTransactionData();
+        }
+
+        return [order, {
+            inputToken: takerToken === 'ETH' ? ETH_TOKEN_ADDRESS : takerToken.address,
+            outputToken: makerToken === 'ETH' ? ETH_TOKEN_ADDRESS : makerToken.address,
+            inputTokenAmount: order.takerAmount,
+            data: calldata
+        }];
     }
 
     function verifyBundleSwapEventsFromLogs(
@@ -367,6 +432,30 @@ blockchainTests.resets('BundleSwapFeature', env => {
         );
     }
 
+    async function assertExpectedFinalBalancesFromOtcOrderFillAsync(
+        order: OtcOrder,
+        takerTokenFillAmount: BigNumber = order.takerAmount,
+    ): Promise<void> {
+        const { makerTokenFilledAmount, takerTokenFilledAmount } = computeOtcOrderFilledAmounts(
+            order,
+            takerTokenFillAmount,
+        );
+
+        if (order.takerToken !== ETH_TOKEN_ADDRESS) {
+            const makerBalance = await new TestMintableERC20TokenContract(order.takerToken, env.provider)
+                .balanceOf(order.maker)
+                .callAsync();
+            expect(makerBalance, 'maker balance').to.bignumber.eq(takerTokenFilledAmount);
+        }
+
+        if (order.makerToken !== ETH_TOKEN_ADDRESS) {
+            const takerBalance = await new TestMintableERC20TokenContract(order.makerToken, env.provider)
+                .balanceOf(order.taker !== NULL_ADDRESS ? order.taker : taker)
+                .callAsync();
+            expect(takerBalance, 'taker balance').to.bignumber.eq(makerTokenFilledAmount);
+        }
+    }
+
     before(async () => {
         [owner, maker, taker] = await env.getAccountAddressesAsync();
         zeroEx = await fullMigrateAsync(owner, env.provider, env.txDefaults, {});
@@ -406,7 +495,7 @@ blockchainTests.resets('BundleSwapFeature', env => {
         // TODO
         await migrateUniswapV3ContractsAsync();
         await migrateLiquidityProviderContractsAsync();
-        // await migrateOtcOrdersFeatureAsync();
+        await migrateOtcOrdersFeatureAsync();
         // await migrateUniswapV2ContractsAsync();
         transformerNonce = await env.web3Wrapper.getAccountNonceAsync(owner);
         await TestMintTokenERC20TransformerContract.deployFrom0xArtifactAsync(
@@ -448,7 +537,7 @@ blockchainTests.resets('BundleSwapFeature', env => {
 
             it('LiquidityProvider', async () => {
                 await fundLiquidityProvider(zrx);
-                const liquidityProviderSwap = getLiquidityProviderSwap(liquidityProvider, dai, zrx);
+                const liquidityProviderSwap = getLiquidityProviderSwap(dai, zrx);
                 await mintToAsync(dai, taker, liquidityProviderSwap.inputTokenAmount);
 
                 const tx = await bundleSwap.bundleSwap([
@@ -473,6 +562,23 @@ blockchainTests.resets('BundleSwapFeature', env => {
                     { swap: liquidityProviderSwap, source: liquidityProvider },
                 ], tx.logs);
             });
+
+            it('OtcOrder', async () => {
+                const [order, otcOrderSwap] = await getOtcOrderSwap(dai, shib);
+
+                await mintToAsync(dai, taker, otcOrderSwap.inputTokenAmount);
+                await mintToAsync(shib, maker, order.makerAmount);
+
+                const tx = await bundleSwap.bundleSwap([
+                    otcOrderSwap
+                ], ErrorBehaviour.REVERT).awaitTransactionSuccessAsync({from: taker});
+
+                await assertExpectedFinalBalancesFromOtcOrderFillAsync(order);
+
+                verifyBundleSwapEventsFromLogs([
+                    { swap: otcOrderSwap, source: {address: maker} },
+                ], tx.logs);
+            });
         });
 
         describe('swap eth for token', () => {
@@ -491,7 +597,7 @@ blockchainTests.resets('BundleSwapFeature', env => {
 
             it('LiquidityProvider', async () => {
                 await fundLiquidityProvider(zrx);
-                const liquidityProviderSwap = getLiquidityProviderSwap(liquidityProvider, 'ETH', zrx);
+                const liquidityProviderSwap = getLiquidityProviderSwap('ETH', zrx);
 
                 const tx = await bundleSwap.bundleSwap([
                     liquidityProviderSwap
@@ -514,6 +620,22 @@ blockchainTests.resets('BundleSwapFeature', env => {
                     { swap: liquidityProviderSwap, source: liquidityProvider },
                 ], tx.logs);
             });
+
+            it('OtcOrder', async () => {
+                const [order, otcOrderSwap] = await getOtcOrderSwap('ETH', shib);
+
+                await mintToAsync(shib, maker, order.makerAmount);
+
+                const tx = await bundleSwap.bundleSwap([
+                    otcOrderSwap
+                ], ErrorBehaviour.REVERT).awaitTransactionSuccessAsync({from: taker, value: otcOrderSwap.inputTokenAmount});
+
+                await assertExpectedFinalBalancesFromOtcOrderFillAsync(order);
+
+                verifyBundleSwapEventsFromLogs([
+                    { swap: otcOrderSwap, source: {address: maker} },
+                ], tx.logs);
+            });
         });
 
         describe('swap token for eth', () => {
@@ -534,7 +656,7 @@ blockchainTests.resets('BundleSwapFeature', env => {
 
             it('LiquidityProvider', async () => {
                 await fundLiquidityProvider('ETH');
-                const liquidityProviderSwap = getLiquidityProviderSwap(liquidityProvider, dai, 'ETH');
+                const liquidityProviderSwap = getLiquidityProviderSwap(dai, 'ETH');
                 await mintToAsync(dai, taker, liquidityProviderSwap.inputTokenAmount);
 
                 const tx = await bundleSwap.bundleSwap([
@@ -556,6 +678,27 @@ blockchainTests.resets('BundleSwapFeature', env => {
 
                 verifyBundleSwapEventsFromLogs([
                     { swap: liquidityProviderSwap, source: liquidityProvider },
+                ], tx.logs);
+            });
+
+            it('OtcOrder', async () => {
+                const [order, otcOrderSwap] = await getOtcOrderSwap(dai, 'ETH');
+
+                await mintToAsync(dai, taker, otcOrderSwap.inputTokenAmount);
+                await mintToAsync(weth, maker, order.makerAmount);
+
+                const ethBalanceBefore = await env.web3Wrapper.getBalanceInWeiAsync(taker);
+
+                const tx = await bundleSwap.bundleSwap([
+                    otcOrderSwap
+                ], ErrorBehaviour.REVERT).awaitTransactionSuccessAsync({from: taker});
+
+                const ethBalanceAfter = await env.web3Wrapper.getBalanceInWeiAsync(taker);
+
+                expect(ethBalanceAfter).to.bignumber.eq(ethBalanceBefore.plus(order.makerAmount).minus(tx.gasUsed));
+
+                verifyBundleSwapEventsFromLogs([
+                    { swap: otcOrderSwap, withdraw: true, source: {address: maker} },
                 ], tx.logs);
             });
         });
@@ -594,7 +737,7 @@ blockchainTests.resets('BundleSwapFeature', env => {
                 const uniV3ShibZrx = await createUniswapV3PoolAsync(shib, zrx);
 
                 const uniV3SwapDaiShib = getUniswapV3Swap([dai, shib]);
-                const liquidityProviderSwapDaiZrx = getLiquidityProviderSwap(liquidityProvider, dai, zrx);
+                const liquidityProviderSwapDaiZrx = getLiquidityProviderSwap(dai, zrx);
                 const uniV3SwapShibZrx = getUniswapV3Swap([shib, zrx]);
 
                 await mintToAsync(dai, taker, BigNumber.sum(uniV3SwapDaiShib.inputTokenAmount, liquidityProviderSwapDaiZrx.inputTokenAmount));
@@ -610,6 +753,31 @@ blockchainTests.resets('BundleSwapFeature', env => {
                     { swap: uniV3SwapDaiShib, outputFirst: true, source: uniV3DaiShib },
                     { swap: liquidityProviderSwapDaiZrx, source: liquidityProvider },
                     { swap: uniV3SwapShibZrx, outputFirst: true, source: uniV3ShibZrx }
+                ], tx.logs);
+            });
+
+            it('UniV3, LiquidityProvider, OtcOrder', async () => {
+                const uniV3DaiShib = await createUniswapV3PoolAsync(dai, shib);
+                await fundLiquidityProvider(zrx);
+
+                const uniV3SwapDaiShib = getUniswapV3Swap([dai, shib]);
+                const liquidityProviderSwapDaiZrx = getLiquidityProviderSwap(dai, zrx);
+                const [order, otcOrderSwap] = await getOtcOrderSwap(shib, zrx);
+
+                await mintToAsync(dai, taker, BigNumber.sum(uniV3SwapDaiShib.inputTokenAmount, liquidityProviderSwapDaiZrx.inputTokenAmount));
+                await mintToAsync(shib, taker, otcOrderSwap.inputTokenAmount);
+                await mintToAsync(zrx, maker, order.makerAmount);
+
+                const tx = await bundleSwap.bundleSwap([
+                    uniV3SwapDaiShib,
+                    liquidityProviderSwapDaiZrx,
+                    otcOrderSwap
+                ], ErrorBehaviour.REVERT).awaitTransactionSuccessAsync({from: taker});
+
+                verifyBundleSwapEventsFromLogs([
+                    { swap: uniV3SwapDaiShib, outputFirst: true, source: uniV3DaiShib },
+                    { swap: liquidityProviderSwapDaiZrx, source: liquidityProvider },
+                    { swap: otcOrderSwap, source: {address: maker} }
                 ], tx.logs);
             });
         });
