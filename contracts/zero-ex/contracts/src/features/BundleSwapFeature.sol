@@ -80,11 +80,15 @@ contract BundleSwapFeature is
                 }
             } else {
                 // cannot ErrorBehaviour.STOP or CONTINUE - always has to revert to not lose sent ETH
+                // REVIEW: I think the issue here might occur even for erc20 cases, the swap can fail
+                // after transfers have been made, so maybe we need to check that input amount of token
+                // is still held the owner, which can be tricky...
                 if (LibERC20Transformer.isTokenETH(swap.inputToken)) {
                     revert("BundleSwapFeature::bundleSwap/SELL_ETH_REVERTED");
                 }
 
                 // also revert if first trade
+                // REVIEW: I think here the check meant is `i == 0` instead of `length == 0`
                 if (errorBehaviour == ErrorBehaviour.REVERT || length == 0) {
                     result.returnData.rrevert();
                 }
@@ -95,6 +99,7 @@ contract BundleSwapFeature is
             }
         }
 
+        // REVIEW: Is this really possible ?
         if (value < 0) {
             revert("BundleSwapFeature::bundleSwap/ETH_LEAK");
         }
@@ -108,9 +113,14 @@ contract BundleSwapFeature is
     }
 
     function _swap(Swap calldata swap) private returns (Result memory result) {
+        // REVIEW: the called sub-features already do some logic
+        // for transferring tokens from the user wallet, the transfer
+        // here may lead to guaranteed failures. I'm not sure we need it
         bool success = _getInputToken(swap);
         if (success) {
             result = _callFeature(swap);
+            // REVIEW: same for returning tokens to user waller
+            // sub-features would normally take care of it
             _returnOutputToken(swap, result.outputTokenAmount);
         }
     }
