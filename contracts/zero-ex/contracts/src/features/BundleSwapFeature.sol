@@ -84,8 +84,8 @@ contract BundleSwapFeature is
                     revert("BundleSwapFeature::bundleSwap/SELL_ETH_REVERTED");
                 }
 
-                // also revert if first trade
-                if (errorBehaviour == ErrorBehaviour.REVERT || length == 0) {
+                // also revert if just one swap
+                if (errorBehaviour == ErrorBehaviour.REVERT || length == 1) {
                     result.returnData.rrevert();
                 }
                 _returnInputTokenOnError(swap);
