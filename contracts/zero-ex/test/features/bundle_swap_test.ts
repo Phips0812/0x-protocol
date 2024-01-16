@@ -1,7 +1,7 @@
 import {
     blockchainTests,
     constants, expect,
-    getRandomInteger,
+    getRandomInteger, Numberish,
     toBaseUnitAmount,
     verifyEventsFromLogs
 } from "@0x/contracts-test-utils";
@@ -18,10 +18,13 @@ import {
     TestMintableERC20TokenContract,
     TestMintableERC20TokenEvents
 } from "../generated-wrappers/test_mintable_erc20_token";
-import {TestMintTokenERC20TransformerContract} from "../generated-wrappers/test_mint_token_erc20_transformer";
+import {
+    TestMintTokenERC20TransformerContract,
+    TestMintTokenERC20TransformerEvents
+} from "../generated-wrappers/test_mint_token_erc20_transformer";
 import {abis} from "../utils/abis";
 import {BundleSwapFeatureContract} from "../generated-wrappers/bundle_swap_feature";
-import {BigNumber, hexUtils, NULL_ADDRESS} from "@0x/utils";
+import {AbiEncoder, BigNumber, hexUtils, NULL_ADDRESS} from "@0x/utils";
 import {TestUniswapV3PoolContract} from "../generated-wrappers/test_uniswap_v3_pool";
 import {LogEntry, LogWithDecodedArgs} from "ethereum-types";
 import {TestBundleSwapErrorsERC20TokenContract} from "../generated-wrappers/test_bundle_swap_errors_erc20_token";
@@ -34,6 +37,10 @@ import {LiquidityProviderFeatureContract} from "../../generated-wrappers/liquidi
 import {OtcOrdersFeatureContract} from "../generated-wrappers/otc_orders_feature";
 import {OtcOrder} from "@0x/protocol-utils";
 import {computeOtcOrderFilledAmounts, getRandomOtcOrder} from "../utils/orders";
+import {
+    TransformERC20FeatureContract,
+    TransformERC20FeatureEvents
+} from "../generated-wrappers/transform_erc20_feature";
 
 interface TransferEvent {
     token: string;
@@ -62,6 +69,7 @@ interface VerifyConfig {
     withdraw?: boolean; // withdraw ETH from WETH
     source?: {address: string};
     fail?: boolean;
+    additionalTransferEvents?: {index: number, event: TransferEvent}[]
 }
 
 const ETH_TOKEN_ADDRESS = '0xEeeeeEeeeEeEeeEeEeEeeEEEeeeeEeeeeeeeEEeE';
@@ -74,12 +82,11 @@ blockchainTests.resets('BundleSwapFeature', env => {
     let flashWalletAddress: string;
     let uniV3Factory: TestUniswapV3FactoryContract;
     let uniV3Feature: UniswapV3FeatureContract;
-    // let sandbox: LiquidityProviderSandboxContract;
     let liquidityProviderFeature: LiquidityProviderFeatureContract;
     let liquidityProvider: TestLiquidityProviderContract;
     let otcOrdersFeature: OtcOrdersFeatureContract;
-    // let sushiFactory: TestUniswapV2FactoryContract;
-    // let uniV2Factory: TestUniswapV2FactoryContract;
+    let transformERC20Feature: TransformERC20FeatureContract;
+    let mintTransformer: TestMintTokenERC20TransformerContract;
     let dai: TestMintableERC20TokenContract;
     let shib: TestMintableERC20TokenContract;
     let zrx: TestMintableERC20TokenContract;
@@ -88,6 +95,7 @@ blockchainTests.resets('BundleSwapFeature', env => {
     let owner: string;
     let maker: string;
     let taker: string;
+    let transformerDeployer: string;
     let transformerNonce: number;
 
     async function migrateUniswapV3ContractsAsync(): Promise<void> {
@@ -150,6 +158,25 @@ blockchainTests.resets('BundleSwapFeature', env => {
         await new IOwnableFeatureContract(zeroEx.address, env.provider, env.txDefaults)
             .migrate(otcOrdersFeature.address, otcOrdersFeature.migrate().getABIEncodedTransactionData(), owner)
             .awaitTransactionSuccessAsync();
+    }
+
+    async function migrateTransformERC20FeatureAsync(): Promise<void> {
+        transformERC20Feature = new TransformERC20FeatureContract(
+            zeroEx.address,
+            env.provider,
+            { ...env.txDefaults },
+            abis,
+        );
+
+        mintTransformer = await TestMintTokenERC20TransformerContract.deployFrom0xArtifactAsync(
+            artifacts.TestMintTokenERC20Transformer,
+            env.provider,
+            {
+                ...env.txDefaults,
+                from: transformerDeployer,
+            },
+            artifacts,
+        );
     }
 
     function isWethContract(t: TestMintableERC20TokenContract | TestWethContract | TestBundleSwapErrorsERC20TokenContract): t is TestWethContract {
@@ -325,15 +352,100 @@ blockchainTests.resets('BundleSwapFeature', env => {
         }];
     }
 
+    function getTransformERC20Swap(
+        inputToken: 'ETH' | TestMintableERC20TokenContract | TestWethContract | TestBundleSwapErrorsERC20TokenContract,
+        outputToken: 'ETH' | TestMintableERC20TokenContract | TestWethContract | TestBundleSwapErrorsERC20TokenContract,
+        sellAmount: BigNumber = getRandomInteger(1, toBaseUnitAmount(1)),
+        minBuyAmount: BigNumber = getRandomInteger(1, toBaseUnitAmount(1))
+    ): [BigNumber, Transformation, Swap] {
+        const transformation = createMintTokenTransformation(
+            inputToken === 'ETH' ? ETH_TOKEN_ADDRESS : inputToken.address,
+            outputToken === 'ETH' ? ETH_TOKEN_ADDRESS : outputToken.address, {
+                outputTokenMintAmount: minBuyAmount,
+                inputTokenBurnAmount: sellAmount,
+            }
+        );
+
+        const calldata = transformERC20Feature.transformERC20(
+            inputToken === 'ETH' ? ETH_TOKEN_ADDRESS : inputToken.address,
+            outputToken === 'ETH' ? ETH_TOKEN_ADDRESS : outputToken.address,
+            sellAmount,
+            minBuyAmount,
+            [transformation]
+        ).getABIEncodedTransactionData();
+
+        return [minBuyAmount, transformation, {
+            inputToken: inputToken === 'ETH' ? ETH_TOKEN_ADDRESS : inputToken.address,
+            outputToken: outputToken === 'ETH' ? ETH_TOKEN_ADDRESS : outputToken.address,
+            inputTokenAmount: sellAmount,
+            data: calldata
+        }];
+    }
+
+    interface Transformation {
+        deploymentNonce: number;
+        data: string;
+    }
+
+    function createMintTokenTransformation(
+        inputTokenAddress: string,
+        outputTokenAddress: string,
+        opts: Partial<{
+            transformer: string;
+            inputTokenBurnAmount: Numberish;
+            outputTokenMintAmount: Numberish;
+            outputTokenFeeAmount: Numberish;
+            deploymentNonce: number;
+        }> = {},
+    ): Transformation {
+        const _opts = {
+            inputTokenBurnAmunt: constants.ZERO_AMOUNT,
+            outputTokenMintAmount: constants.ZERO_AMOUNT,
+            outputTokenFeeAmount: constants.ZERO_AMOUNT,
+            transformer: mintTransformer.address,
+            deploymentNonce: transformerNonce,
+            ...opts,
+        };
+        return {
+            deploymentNonce: _opts.deploymentNonce,
+            data: transformDataEncoder.encode([
+                {
+                    inputToken: inputTokenAddress,
+                    outputToken: outputTokenAddress,
+                    burnAmount: _opts.inputTokenBurnAmunt,
+                    mintAmount: _opts.outputTokenMintAmount,
+                    feeAmount: _opts.outputTokenFeeAmount,
+                },
+            ]),
+        };
+    }
+
+    const transformDataEncoder = AbiEncoder.create([
+        {
+            name: 'data',
+            type: 'tuple',
+            components: [
+                { name: 'inputToken', type: 'address' },
+                { name: 'outputToken', type: 'address' },
+                { name: 'burnAmount', type: 'uint256' },
+                { name: 'mintAmount', type: 'uint256' },
+                { name: 'feeAmount', type: 'uint256' },
+            ],
+        },
+    ]);
+
     function verifyBundleSwapEventsFromLogs(
         verifyConfigs: VerifyConfig[],
-        logs: LogEntry[]
+        logs: LogEntry[],
+        additionalTransferEvents: {index: number, event: TransferEvent}[] = []
     ): void {
         const expectedDepositEvents: {owner: string}[] = [];
         const expectedWithdrawEvents: {owner: string}[] = [];
         const expectedTransferEvents: TransferEvent[] = [];
 
         verifyConfigs.forEach(config => {
+            const expectedTransferEventsCountBefore = expectedTransferEvents.length;
+
             let inputToken = config.swap.inputToken;
             if (config.deposit) {
                 inputToken = weth.address;
@@ -413,7 +525,15 @@ blockchainTests.resets('BundleSwapFeature', env => {
                     value: config.swap.inputTokenAmount,
                 });
             }
+
+            config.additionalTransferEvents?.forEach(event => {
+                expectedTransferEvents.splice(expectedTransferEventsCountBefore + event.index, 0, event.event);
+            })
         });
+
+        additionalTransferEvents.forEach(event => {
+            expectedTransferEvents.splice(event.index, 0, event.event);
+        })
 
         verifyEventsFromLogs(
             logs,
@@ -457,7 +577,7 @@ blockchainTests.resets('BundleSwapFeature', env => {
     }
 
     before(async () => {
-        [owner, maker, taker] = await env.getAccountAddressesAsync();
+        [owner, maker, taker, transformerDeployer] = await env.getAccountAddressesAsync();
         zeroEx = await fullMigrateAsync(owner, env.provider, env.txDefaults, {});
         flashWalletAddress = await zeroEx.getTransformWallet().callAsync();
 
@@ -492,11 +612,10 @@ blockchainTests.resets('BundleSwapFeature', env => {
                 t.approve(zeroEx.address, constants.MAX_UINT256).awaitTransactionSuccessAsync({ from: maker }),
             ),
         ]);
-        // TODO
         await migrateUniswapV3ContractsAsync();
         await migrateLiquidityProviderContractsAsync();
         await migrateOtcOrdersFeatureAsync();
-        // await migrateUniswapV2ContractsAsync();
+        await migrateTransformERC20FeatureAsync();
         transformerNonce = await env.web3Wrapper.getAccountNonceAsync(owner);
         await TestMintTokenERC20TransformerContract.deployFrom0xArtifactAsync(
             artifacts.TestMintTokenERC20Transformer,
@@ -577,6 +696,49 @@ blockchainTests.resets('BundleSwapFeature', env => {
 
                 verifyBundleSwapEventsFromLogs([
                     { swap: otcOrderSwap, source: {address: maker} },
+                ], tx.logs);
+            });
+
+            it('TransformERC20', async () => {
+                const [minBuyAmount, transformation, transformERC20Swap] = getTransformERC20Swap(dai, shib);
+
+                await mintToAsync(dai, taker, transformERC20Swap.inputTokenAmount);
+
+                const tx = await bundleSwap.bundleSwap([
+                    transformERC20Swap
+                ], ErrorBehaviour.REVERT).awaitTransactionSuccessAsync({from: taker});
+
+                verifyEventsFromLogs(
+                    tx.logs,
+                    [
+                        {
+                            taker: zeroEx.address,
+                            inputTokenAmount: transformERC20Swap.inputTokenAmount,
+                            outputTokenAmount: minBuyAmount,
+                            inputToken: transformERC20Swap.inputToken,
+                            outputToken: transformERC20Swap.outputToken,
+                        },
+                    ],
+                    TransformERC20FeatureEvents.TransformedERC20,
+                );
+                verifyEventsFromLogs(
+                    tx.logs,
+                    [
+                        {
+                            sender: zeroEx.address,
+                            taker: zeroEx.address,
+                            context: flashWalletAddress,
+                            caller: zeroEx.address,
+                            data: transformation.data,
+                            inputTokenBalance: transformERC20Swap.inputTokenAmount,
+                            ethBalance: constants.ZERO_AMOUNT,
+                        },
+                    ],
+                    TestMintTokenERC20TransformerEvents.MintTransform,
+                );
+
+                verifyBundleSwapEventsFromLogs([
+                    { swap: transformERC20Swap, source: {address: flashWalletAddress}, additionalTransferEvents: [{ index: 2, event: { token: dai.address, from: flashWalletAddress, to: constants.NULL_ADDRESS } }] },
                 ], tx.logs);
             });
         });
